@@ -2523,7 +2523,6 @@ dependencies = [
  "frame-system",
  "gear-runtime",
  "gear-runtime-interface",
- "gear-runtime-test-cli",
  "hex-literal",
  "jsonrpsee",
  "pallet-gear-rpc",

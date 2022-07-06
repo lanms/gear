@@ -192,11 +192,11 @@ pub fn run() -> sc_cli::Result<()> {
                 }
             })
         }
-        Some(Subcommand::GearRuntimeTest(cmd)) => {
-            let runner = cli.create_runner(cmd)?;
+        // Some(Subcommand::GearRuntimeTest(cmd)) => {
+        //     let runner = cli.create_runner(cmd)?;
 
-            runner.sync_run(|config| cmd.run(config))
-        }
+        //     runner.sync_run(|config| cmd.run(config))
+        // }
         #[cfg(feature = "try-runtime")]
         Some(Subcommand::TryRuntime(cmd)) => {
             let runner = cli.create_runner(cmd)?;
