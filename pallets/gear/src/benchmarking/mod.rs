@@ -274,6 +274,12 @@ benchmarks! {
         T::AccountId: Origin,
     }
 
+    check_overlay {
+        Gear::<T>::init_check_overlay();
+        let caller = whitelisted_caller();
+        let origin = RawOrigin::Signed(caller);
+    }: _(origin)
+
     // This constructs a program that is maximal expensive to instrument.
     // It creates a maximum number of metering blocks per byte.
     //

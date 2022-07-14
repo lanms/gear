@@ -380,6 +380,10 @@ pub mod pallet {
         MessagesStorageCorrupted,
     }
 
+    #[pallet::storage]
+    #[pallet::unbounded]
+    pub(crate) type CheckOverlay<T: Config> = StorageMap<_, Identity, u32, u128>;
+
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T>
     where
@@ -1329,6 +1333,10 @@ pub mod pallet {
 
             Ok(code_and_id.into_parts().0)
         }
+
+        pub(crate) fn init_check_overlay() {
+            CheckOverlay::<T>::insert(0, 100);
+        }
     }
 
     #[pallet::call]
@@ -1336,6 +1344,19 @@ pub mod pallet {
     where
         T::AccountId: Origin,
     {
+        #[pallet::weight(0)]
+        pub fn check_overlay(_origin: OriginFor<T>) -> DispatchResultWithPostInfo {
+            let _value = CheckOverlay::<T>::get(0);
+            let _value = CheckOverlay::<T>::get(0);
+            let _value = CheckOverlay::<T>::get(0);
+            let _value = CheckOverlay::<T>::get(0);
+
+            // uncomment to get second DB read
+            // let _value = CheckOverlay::<T>::get(1);
+
+            Ok(().into())
+        }
+
         /// Saves program `code` in storage.
         ///
         /// The extrinsic was created to provide _deploy program from program_ functionality.
