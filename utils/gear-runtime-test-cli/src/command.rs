@@ -37,7 +37,7 @@ use gear_test::{
     check::read_test_from_file,
     js::{MetaData, MetaType},
     proc::*,
-    sample::{self, ChainProgram, PayloadVariant},
+    sample::{self, ChainProgram, PayloadVariant, Test},
 };
 use junit_common::{TestCase, TestSuite, TestSuites};
 use pallet_gear::{Config, GasAllowanceOf, GasHandlerOf, Pallet as GearPallet};
@@ -50,7 +50,8 @@ use sp_runtime::{app_crypto::UncheckedFrom, AccountId32};
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicUsize, Ordering},
-    time::Instant,
+    thread,
+    time::{Duration, Instant},
 };
 
 impl GearRuntimeTestCmd {
@@ -67,6 +68,13 @@ impl GearRuntimeTestCmd {
             }
         }
 
+        tests.push(Test {
+            title: "empty".to_string(),
+            codes: None,
+            programs: Vec::new(),
+            fixtures: Vec::new(),
+        });
+
         let total_fixtures: usize = tests.iter().map(|t| t.fixtures.len()).sum();
         let total_failed = AtomicUsize::new(0);
 
@@ -74,6 +82,15 @@ impl GearRuntimeTestCmd {
         let (executions, times) = tests
             .par_iter()
             .map(|test| {
+                if test.title == "empty" {
+                    return (
+                        TestSuite {
+                            name: "empty".to_string(),
+                            testcase: Vec::new(),
+                        },
+                        0f64,
+                    );
+                }
                 let (fixtures, times) = test
                     .fixtures
                     .par_iter()
@@ -261,7 +278,8 @@ fn run_fixture(test: &'_ sample::Test, fixture: &sample::Fixture) -> ColoredStri
     let mut errors = vec![];
     let mut expected_log = vec![];
 
-    for message in &fixture.messages {
+    let empty = Vec::new();
+    for message in fixture.messages.as_ref().unwrap_or_else(|| &empty) {
         let payload = match &message.payload {
             Some(PayloadVariant::Utf8(s)) => parse_payload(s.clone()).as_bytes().to_vec(),
             Some(PayloadVariant::Custom(v)) => {
@@ -366,7 +384,8 @@ fn run_fixture(test: &'_ sample::Test, fixture: &sample::Fixture) -> ColoredStri
         }
     }
 
-    for exp in &fixture.expected {
+    let empty = Vec::new();
+    for exp in fixture.expected.as_ref().unwrap_or_else(|| &empty) {
         let snapshot: DebugData = if let Some(step) = exp.step {
             if snapshots.len() < (step + test.programs.len()) {
                 Default::default()
