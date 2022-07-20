@@ -46,7 +46,7 @@
 
 use gear_core::memory::{HostPointer, PageBuf, PageNumber, WasmPageNumber};
 use sp_std::vec::Vec;
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{cell::RefCell, collections::{BTreeMap, BTreeSet}};
 
 mod sys;
 
@@ -90,6 +90,8 @@ pub(crate) struct LazyPagesExecutionContext {
     /// Page data, which has been in storage before current execution.
     /// For each lazy page, which has been accessed.
     pub released_lazy_pages: BTreeMap<PageNumber, Option<PageBuf>>,
+
+    pub accessed_native_pages: BTreeSet<usize>,
 
     #[deprecated]
     /// Keys in storage for each lazy page.

@@ -305,6 +305,7 @@ pub fn process_executable<A: ProcessorExt + EnvExt + IntoExtInfo + 'static, E: E
 
     let program_id = data.program.id();
 
+    log::info!(target: "wasm-exec-time", "EXEC START");
     let exec_result = executor::execute_wasm::<A, E>(
         balance,
         data,
@@ -317,6 +318,7 @@ pub fn process_executable<A: ProcessorExt + EnvExt + IntoExtInfo + 'static, E: E
         log::debug!("Wasm execution error: {}", err.reason);
         err
     });
+    log::info!(target: "wasm-exec-time", "EXEC END");
 
     match exec_result {
         Ok(res) => match res.kind {

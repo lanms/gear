@@ -225,12 +225,14 @@ where
         F: FnOnce(&Self::Memory) -> Result<(), T>,
         T: fmt::Display,
     {
+        log::info!(target: "wasm-exec-time", "WASM START");
         let res = if self.entries.contains(entry_point) {
             self.instance
                 .invoke(entry_point.into_entry(), &[], &mut self.runtime)
         } else {
             Ok(ReturnValue::Unit)
         };
+        log::info!(target: "wasm-exec-time", "WASM END");
 
         let Runtime {
             ext,
