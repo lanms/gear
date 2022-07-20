@@ -69,6 +69,8 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
     log::debug!("Interrupted, exception info = {:?}", info);
 
     let mem = info.fault_addr;
+    let is_write = info.is_write.unwrap_or(false);
+
     let native_page_addr = region::page::floor(mem) as usize;
     let wasm_mem_addr = LAZY_PAGES_CONTEXT
         .with(|ctx| ctx.borrow().wasm_mem_addr)
@@ -103,23 +105,33 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
     );
 
     let unprot_size = gear_pages_num * gear_ps;
-    let is_first_access = LAZY_PAGES_CONTEXT.with(|ctx| {
-        !ctx.borrow()
-            .accessed_native_pages
-            .contains(&native_page_addr)
-    });
-    if is_first_access {
+
+    let is_first_access_and_not_write = !is_write
+        && LAZY_PAGES_CONTEXT.with(|ctx| {
+            !ctx.borrow()
+                .accessed_native_pages
+                .contains(&native_page_addr)
+        });
+
+    if is_first_access_and_not_write {
         log::trace!("First access - allow to read page");
         region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
     } else {
-        log::trace!("Second access - allow to read/write page");
+        log::trace!(
+            "It's {} - allow to read/write page",
+            if is_write {
+                "write access"
+            } else {
+                "second access"
+            }
+        );
         region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
     }
 
     LAZY_PAGES_CONTEXT.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
 
-        if is_first_access {
+        if is_first_access_and_not_write {
             ctx.accessed_native_pages.insert(native_page_addr);
         }
 
@@ -154,7 +166,7 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
                 });
             }
 
-            if !is_first_access {
+            if !is_first_access_and_not_write {
                 let _ = ctx.released_lazy_pages.insert(page, None);
             }
 
