@@ -50,8 +50,7 @@ use sp_runtime::{app_crypto::UncheckedFrom, AccountId32};
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicUsize, Ordering},
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 impl GearRuntimeTestCmd {
