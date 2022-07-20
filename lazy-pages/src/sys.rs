@@ -20,7 +20,7 @@
 
 use crate::{Error, LAZY_PAGES_CONTEXT};
 use cfg_if::cfg_if;
-use gear_core::memory::{PageBuf, PageNumber};
+use gear_core::memory::PageNumber;
 use region::Protection;
 
 cfg_if! {
@@ -39,6 +39,7 @@ cfg_if! {
 pub struct ExceptionInfo {
     /// Address where fault is occurred
     pub fault_addr: *const (),
+    pub is_write: Option<bool>,
 }
 
 /// Returns key which `page` has in storage.
@@ -68,30 +69,30 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
     log::debug!("Interrupted, exception info = {:?}", info);
 
     let mem = info.fault_addr;
-    let native_page = region::page::floor(mem) as usize;
-    let wasm_mem_begin = LAZY_PAGES_CONTEXT
+    let native_page_addr = region::page::floor(mem) as usize;
+    let wasm_mem_addr = LAZY_PAGES_CONTEXT
         .with(|ctx| ctx.borrow().wasm_mem_addr)
         .ok_or(Error::WasmMemAddrIsNotSet)? as usize;
 
-    if wasm_mem_begin > native_page {
+    if wasm_mem_addr > native_page_addr {
         return Err(Error::SignalFromUnknownMemory {
-            wasm_mem_begin,
-            native_page,
+            wasm_mem_begin: wasm_mem_addr,
+            native_page: native_page_addr,
         });
     }
 
-    // First gear page which must be unprotected
-    let gear_page = PageNumber(((native_page - wasm_mem_begin) / gear_ps) as u32);
+    // First gear page, for which we will remove protection
+    let gear_page = PageNumber(((native_page_addr - wasm_mem_addr) / gear_ps) as u32);
 
-    let (gear_page, gear_pages_num, unprot_addr) = if native_ps > gear_ps {
+    let (gear_pages_num, unprot_addr) = if native_ps > gear_ps {
         assert_eq!(native_ps % gear_ps, 0);
-        (gear_page, native_ps / gear_ps, native_page)
+        (native_ps / gear_ps, native_page_addr)
     } else {
         assert_eq!(gear_ps % native_ps, 0);
-        (gear_page, 1usize, wasm_mem_begin + gear_page.offset())
+        (1usize, wasm_mem_addr + gear_page.offset())
     };
 
-    let accessed_page = PageNumber(((mem as usize - wasm_mem_begin) / gear_ps) as u32);
+    let accessed_page = PageNumber(((mem as usize - wasm_mem_addr) / gear_ps) as u32);
     log::debug!(
         "mem={:?} accessed={:?},{:?} pages={:?} page_native_addr={:#x}",
         mem,
@@ -102,11 +103,26 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
     );
 
     let unprot_size = gear_pages_num * gear_ps;
-
-    region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
+    let is_first_access = LAZY_PAGES_CONTEXT.with(|ctx| {
+        !ctx.borrow()
+            .accessed_native_pages
+            .contains(&native_page_addr)
+    });
+    if is_first_access {
+        log::trace!("First access - allow to read page");
+        region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
+    } else {
+        log::trace!("Second access - allow to read/write page");
+        region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
+    }
 
     LAZY_PAGES_CONTEXT.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
+
+        if is_first_access {
+            ctx.accessed_native_pages.insert(native_page_addr);
+        }
+
         for idx in 0..gear_pages_num as u32 {
             let page = gear_page + idx.into();
 
@@ -119,17 +135,16 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
                 page_key_in_storage(prefix, page)
             } else {
                 // This case is for old runtimes support
-                ctx.lazy_pages_info.remove(&page).ok_or(Error::LazyPageNotExistForSignalAddr(mem, page))?
+                ctx.lazy_pages_info
+                    .remove(&page)
+                    .ok_or(Error::LazyPageNotExistForSignalAddr(mem, page))?
             };
             let res = sp_io::storage::read(&page_key, buffer_as_slice, 0);
 
             if res.is_none() {
-                log::trace!(
-                    "{:?} has no data in storage, so just save current page data to released pages",
-                    page
-                );
+                log::trace!("{:?} has no data in storage", page);
             } else {
-                log::trace!("{:?} has data in storage, so set this data for page and save it in released pages", page);
+                log::trace!("{:?} has data in storage", page);
             }
 
             if let Some(size) = res.filter(|&size| size as usize != PageNumber::size()) {
@@ -139,16 +154,20 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
                 });
             }
 
-            let page_buf = PageBuf::new_from_vec(buffer_as_slice.to_vec())
-                .expect("Cannot panic here, because we create slice with PageBuf size");
-
-            if ctx
-                .released_lazy_pages
-                .insert(page, Some(page_buf))
-                .is_some()
-            {
-                return Err(Error::DoubleRelease(page));
+            if !is_first_access {
+                let _ = ctx.released_lazy_pages.insert(page, None);
             }
+
+            // let page_buf = PageBuf::new_from_vec(buffer_as_slice.to_vec())
+            //     .expect("Cannot panic here, because we create slice with PageBuf size");
+
+            // if ctx
+            //     .released_lazy_pages
+            //     .insert(page, Some(page_buf))
+            //     .is_some()
+            // {
+            //     return Err(Error::DoubleRelease(page));
+            // }
         }
         Ok(())
     })

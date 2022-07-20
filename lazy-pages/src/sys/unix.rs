@@ -25,11 +25,26 @@ use nix::{
 };
 use std::io::{self};
 
-extern "C" fn handle_sigsegv(_sig: i32, info: *mut siginfo_t, _ucontext: *mut c_void) {
+extern "C" fn handle_sigsegv(_sig: i32, info: *mut siginfo_t, ucontext: *mut c_void) {
     unsafe {
+        #[cfg(target_arch = "x86_64")]
+        let is_write = {
+            let ucontext = ucontext as *const libc::ucontext_t;
+            let error_reg = libc::REG_ERR as usize;
+            let error_code = unsafe { (*ucontext).uc_mcontext.gregs[error_reg] };
+            Some(error_code & 0b10 == 0)
+        };
+
+        #[cfg(not(target_arch = "x86_64"))]
+        let is_write = {
+            let _unused_warning_resolver = ucontext;
+            None
+        };
+
         let addr = (*info).si_addr();
         let info = ExceptionInfo {
             fault_addr: addr as *mut _,
+            is_write,
         };
 
         super::user_signal_handler(info).expect("Memory exception handler");

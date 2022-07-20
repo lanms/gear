@@ -113,17 +113,17 @@ pub fn protect_pages_and_init_info(mem: &impl Memory, prog_id: ProgramId) -> Res
 /// Lazy pages contract post execution actions
 pub fn post_execution_actions(
     mem: &impl Memory,
-    pages_data: &mut BTreeMap<PageNumber, PageBuf>,
+    _pages_data: &mut BTreeMap<PageNumber, PageBuf>,
 ) -> Result<(), Error> {
     // Loads data for released lazy pages. Data which was before execution.
-    let released_pages = gear_ri::get_released_pages();
-    for page in released_pages {
-        let data = gear_ri::get_released_page_old_data(page)
-            .ok_or_else(|| Error::ReleasedPageHasNoData(page.into()))?;
-        if pages_data.insert(page.into(), data).is_some() {
-            return Err(Error::ReleasedPageHasInitialData(page.into()));
-        }
-    }
+    // let released_pages = gear_ri::get_released_pages();
+    // for page in released_pages {
+    //     let data = gear_ri::get_released_page_old_data(page)
+    //         .ok_or_else(|| Error::ReleasedPageHasNoData(page.into()))?;
+    //     if pages_data.insert(page.into(), data).is_some() {
+    //         return Err(Error::ReleasedPageHasInitialData(page.into()));
+    //     }
+    // }
 
     // Removes protections from lazy pages
     mprotect_lazy_pages(mem, false)
