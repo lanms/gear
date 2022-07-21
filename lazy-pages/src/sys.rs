@@ -88,10 +88,10 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
 
     let (gear_pages_num, unprot_addr) = if native_ps > gear_ps {
         assert_eq!(native_ps % gear_ps, 0);
-        (native_ps / gear_ps, native_page_addr)
+        ((native_ps / gear_ps) as u32, native_page_addr)
     } else {
         assert_eq!(gear_ps % native_ps, 0);
-        (1usize, wasm_mem_addr + gear_page.offset())
+        (1, wasm_mem_addr + gear_page.offset())
     };
 
     let accessed_page = PageNumber(((mem as usize - wasm_mem_addr) / gear_ps) as u32);
@@ -104,35 +104,39 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
         unprot_addr
     );
 
-    let unprot_size = gear_pages_num * gear_ps;
+    let unprot_size = gear_pages_num as usize * gear_ps;
+    region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
 
-    let is_first_access_and_not_write = !is_write
-        && LAZY_PAGES_CONTEXT.with(|ctx| {
+    let is_first_access = LAZY_PAGES_CONTEXT.with(|ctx| {
             !ctx.borrow()
                 .accessed_native_pages
                 .contains(&native_page_addr)
         });
 
-    if is_first_access_and_not_write {
-        log::trace!("First access - allow to read page");
-        region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
-    } else {
-        log::trace!(
-            "It's {} - allow to read/write page",
-            if is_write {
-                "write access"
-            } else {
-                "second access"
-            }
-        );
-        region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
-    }
+    // if is_first_access && !is_write {
+    //     log::trace!("First access - allow to read page");
+    //     region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
+    // } else {
+    //     log::trace!(
+    //         "It's {} - allow to read/write page",
+    //         if is_write {
+    //             "write access"
+    //         } else {
+    //             "second access"
+    //         }
+    //     );
+    //     region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
+    // }
 
     LAZY_PAGES_CONTEXT.with(|ctx| {
         let mut ctx = ctx.borrow_mut();
 
-        if is_first_access_and_not_write {
+        if is_first_access {
             ctx.accessed_native_pages.insert(native_page_addr);
+        } else {
+            log::trace!("Second access (write) - no need to store data from storage, keep r/w prot");
+            ctx.released_lazy_pages.extend((0..gear_pages_num as u32).map(|p| (gear_page + p.into(), None)));
+            return Ok(());
         }
 
         for idx in 0..gear_pages_num as u32 {
@@ -166,7 +170,7 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
                 });
             }
 
-            if !is_first_access_and_not_write {
+            if is_write {
                 let _ = ctx.released_lazy_pages.insert(page, None);
             }
 
@@ -181,6 +185,14 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
             //     return Err(Error::DoubleRelease(page));
             // }
         }
+
+        if !is_write {
+            log::trace!("First access - set read prot");
+            region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
+        } else {
+            log::trace!("First write access - keep r/w prot");
+        }
+
         Ok(())
     })
 }

@@ -30,7 +30,7 @@
             local.get $i
             i32.const 0x1000
             i32.mul
-            i32.const 0x0
+            i32.const 0x800
             i32.add
             i32.const 0x42
             i32.store

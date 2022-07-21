@@ -20,7 +20,7 @@
 
 use crate::sys::ExceptionInfo;
 use nix::{
-    libc::{c_void, siginfo_t},
+    libc::{self, c_void, siginfo_t},
     sys::signal,
 };
 use std::io::{self};
@@ -31,8 +31,8 @@ extern "C" fn handle_sigsegv(_sig: i32, info: *mut siginfo_t, ucontext: *mut c_v
         let is_write = {
             let ucontext = ucontext as *const libc::ucontext_t;
             let error_reg = libc::REG_ERR as usize;
-            let error_code = unsafe { (*ucontext).uc_mcontext.gregs[error_reg] };
-            Some(error_code & 0b10 == 0)
+            let error_code = (*ucontext).uc_mcontext.gregs[error_reg];
+            Some(error_code & 0b10 == 0b10)
         };
 
         #[cfg(not(target_arch = "x86_64"))]
