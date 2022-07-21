@@ -20,22 +20,23 @@
 
 use crate::sys::ExceptionInfo;
 use nix::{
-    libc::{self, c_void, siginfo_t},
+    libc::{c_void, siginfo_t},
     sys::signal,
 };
-use std::io::{self};
+use std::io;
 
 extern "C" fn handle_sigsegv(_sig: i32, info: *mut siginfo_t, ucontext: *mut c_void) {
     unsafe {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let is_write = {
-            let ucontext = ucontext as *const libc::ucontext_t;
-            let error_reg = libc::REG_ERR as usize;
+            let ucontext = ucontext as *const nix::libc::ucontext_t;
+            let error_reg = nix::libc::REG_ERR as usize;
             let error_code = (*ucontext).uc_mcontext.gregs[error_reg];
+            // Use second bit from err reg. See https://git.io/JEQn3
             Some(error_code & 0b10 == 0b10)
         };
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
         let is_write = {
             let _unused_warning_resolver = ucontext;
             None

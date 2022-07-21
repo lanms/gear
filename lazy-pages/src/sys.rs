@@ -18,7 +18,9 @@
 
 //! Lazy pages signal handler functionality.
 
-use crate::{Error, LAZY_PAGES_CONTEXT};
+use std::cell::RefMut;
+
+use crate::{Error, LazyPagesExecutionContext, LAZY_PAGES_CONTEXT};
 use cfg_if::cfg_if;
 use gear_core::memory::PageNumber;
 use region::Protection;
@@ -51,35 +53,29 @@ fn page_key_in_storage(prefix: &Vec<u8>, page: PageNumber) -> Vec<u8> {
     key
 }
 
-/// Before contract execution some pages from wasm memory buffer are protected,
-/// and cannot be accessed anyhow. When wasm executer tries to access one of these pages,
-/// OS emits sigsegv or sigbus or EXCEPTION_ACCESS_VIOLATION. We handle the signal in this function.
-/// Using OS signal info, we identify memory location and wasm page.
-/// We remove read and write protections for page,
-/// then we load wasm page data from storage to wasm page memory location.
-/// Also we save page data to [RELEASED_LAZY_PAGES] in order to identify later
-/// whether page is changed after execution.
-/// After signal handler is done, OS returns execution to the same machine
-/// instruction, which cause signal. Now memory which this instruction accesses
-/// is not protected and with correct data.
-pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
+// TODO: version1
+unsafe fn user_signal_handler_internal(
+    mut ctx: RefMut<LazyPagesExecutionContext>,
+    info: ExceptionInfo,
+) -> Result<(), Error> {
     let native_ps = region::page::size();
     let gear_ps = PageNumber::size();
-
-    log::debug!("Interrupted, exception info = {:?}", info);
 
     let mem = info.fault_addr;
     let is_write = info.is_write.unwrap_or(false);
 
     let native_page_addr = region::page::floor(mem) as usize;
-    let wasm_mem_addr = LAZY_PAGES_CONTEXT
-        .with(|ctx| ctx.borrow().wasm_mem_addr)
-        .ok_or(Error::WasmMemAddrIsNotSet)? as usize;
+    let wasm_mem_addr = ctx.wasm_mem_addr.ok_or(Error::WasmMemAddrIsNotSet)? as usize;
+    let wasm_mem_size = ctx.wasm_mem_size.ok_or(Error::WasmMemSizeIsNotSet)?;
+    let wasm_mem_end_addr = wasm_mem_addr
+        .checked_add(wasm_mem_size)
+        .ok_or(Error::WasmMemEndOverflow)?;
 
-    if wasm_mem_addr > native_page_addr {
+    if native_page_addr < wasm_mem_addr || native_page_addr >= wasm_mem_end_addr {
         return Err(Error::SignalFromUnknownMemory {
-            wasm_mem_begin: wasm_mem_addr,
-            native_page: native_page_addr,
+            wasm_mem_addr,
+            wasm_mem_end_addr,
+            native_page_addr,
         });
     }
 
@@ -100,99 +96,82 @@ pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
         mem,
         accessed_page,
         accessed_page.to_wasm_page(),
-        gear_page.0..gear_page.0 + gear_pages_num as u32,
+        gear_page.0..=gear_page.0 + gear_pages_num - 1,
         unprot_addr
     );
 
+    // Set r/w protection in order to load data from storage into page buffer,
+    // or if it's second access, then it's definitly `write` and we also must set r/w protection.
     let unprot_size = gear_pages_num as usize * gear_ps;
     region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
 
-    let is_first_access = LAZY_PAGES_CONTEXT.with(|ctx| {
-            !ctx.borrow()
-                .accessed_native_pages
-                .contains(&native_page_addr)
-        });
+    let is_first_access = !ctx.accessed_native_pages.contains(&native_page_addr);
 
-    // if is_first_access && !is_write {
-    //     log::trace!("First access - allow to read page");
-    //     region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
-    // } else {
-    //     log::trace!(
-    //         "It's {} - allow to read/write page",
-    //         if is_write {
-    //             "write access"
-    //         } else {
-    //             "second access"
-    //         }
-    //     );
-    //     region::protect(unprot_addr as *mut (), unprot_size, Protection::READ_WRITE)?;
-    // }
+    if is_first_access {
+        ctx.accessed_native_pages.insert(native_page_addr);
+    } else {
+        log::trace!("Second access - no need to load data from storage, keep r/w prot");
+        for page in (0..gear_pages_num).map(|p| gear_page + p.into()) {
+            if ctx.released_lazy_pages.insert(page, None).is_some() {
+                return Err(Error::DoubleRelease(page));
+            }
+        }
+        return Ok(());
+    }
 
-    LAZY_PAGES_CONTEXT.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
+    for idx in 0..gear_pages_num {
+        let page = gear_page + idx.into();
 
-        if is_first_access {
-            ctx.accessed_native_pages.insert(native_page_addr);
+        let ptr = (unprot_addr as *mut u8).add(idx as usize * gear_ps);
+        let buffer_as_slice = std::slice::from_raw_parts_mut(ptr, gear_ps);
+
+        let page_key = if let Some(prefix) = &ctx.program_storage_prefix {
+            page_key_in_storage(prefix, page)
         } else {
-            log::trace!("Second access (write) - no need to store data from storage, keep r/w prot");
-            ctx.released_lazy_pages.extend((0..gear_pages_num as u32).map(|p| (gear_page + p.into(), None)));
-            return Ok(());
+            return Err(Error::ProgramPrefixIsNotSet);
+        };
+        let res = sp_io::storage::read(&page_key, buffer_as_slice, 0);
+
+        log::trace!(
+            "{:?} has{} data in storage",
+            page,
+            if res.is_none() { " no" } else { "" },
+        );
+
+        if let Some(size) = res.filter(|&size| size as usize != PageNumber::size()) {
+            return Err(Error::InvalidPageSize {
+                expected: PageNumber::size(),
+                actual: size,
+            });
         }
 
-        for idx in 0..gear_pages_num as u32 {
-            let page = gear_page + idx.into();
-
-            let ptr = (unprot_addr as *mut u8).add(idx as usize * gear_ps);
-            let buffer_as_slice = std::slice::from_raw_parts_mut(ptr, gear_ps);
-
-            // TODO: simplify before release (issue #1147). Currently we must support here all old runtimes.
-            // For new runtimes we have to calc page key from program pages prefix.
-            let page_key = if let Some(prefix) = &ctx.program_storage_prefix {
-                page_key_in_storage(prefix, page)
-            } else {
-                // This case is for old runtimes support
-                ctx.lazy_pages_info
-                    .remove(&page)
-                    .ok_or(Error::LazyPageNotExistForSignalAddr(mem, page))?
-            };
-            let res = sp_io::storage::read(&page_key, buffer_as_slice, 0);
-
-            if res.is_none() {
-                log::trace!("{:?} has no data in storage", page);
-            } else {
-                log::trace!("{:?} has data in storage", page);
-            }
-
-            if let Some(size) = res.filter(|&size| size as usize != PageNumber::size()) {
-                return Err(Error::InvalidPageSize {
-                    expected: PageNumber::size(),
-                    actual: size,
-                });
-            }
-
-            if is_write {
-                let _ = ctx.released_lazy_pages.insert(page, None);
-            }
-
-            // let page_buf = PageBuf::new_from_vec(buffer_as_slice.to_vec())
-            //     .expect("Cannot panic here, because we create slice with PageBuf size");
-
-            // if ctx
-            //     .released_lazy_pages
-            //     .insert(page, Some(page_buf))
-            //     .is_some()
-            // {
-            //     return Err(Error::DoubleRelease(page));
-            // }
+        if is_write && ctx.released_lazy_pages.insert(page, None).is_some() {
+            return Err(Error::DoubleRelease(page));
         }
+    }
 
-        if !is_write {
-            log::trace!("First access - set read prot");
-            region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
-        } else {
-            log::trace!("First write access - keep r/w prot");
-        }
+    if !is_write {
+        log::trace!("First access - set read prot");
+        region::protect(unprot_addr as *mut (), unprot_size, Protection::READ)?;
+    } else {
+        log::trace!("First is write access - keep r/w prot");
+    }
 
-        Ok(())
-    })
+    Ok(())
+}
+
+/// Before contract execution some pages from wasm memory buffer are protected,
+/// and cannot be accessed anyhow. When wasm executer tries to access one of these pages,
+/// OS emits sigsegv or sigbus or EXCEPTION_ACCESS_VIOLATION. We handle the signal in this function.
+/// Using OS signal info, we identify memory location and wasm page.
+/// We remove read and write protections for page,
+/// then we load wasm page data from storage to wasm page memory location.
+/// Also we save page data to [RELEASED_LAZY_PAGES] in order to identify later
+/// whether page is changed after execution.
+/// After signal handler is done, OS returns execution to the same machine
+/// instruction, which cause signal. Now memory which this instruction accesses
+/// is not protected and with correct data.
+pub unsafe fn user_signal_handler(info: ExceptionInfo) -> Result<(), Error> {
+    log::debug!("Interrupted, exception info = {:?}", info);
+    LAZY_PAGES_CONTEXT.with(|ctx| user_signal_handler_internal(ctx.borrow_mut(), info))
 }

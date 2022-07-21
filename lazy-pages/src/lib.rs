@@ -46,7 +46,10 @@
 
 use gear_core::memory::{HostPointer, PageBuf, PageNumber, WasmPageNumber};
 use sp_std::vec::Vec;
-use std::{cell::RefCell, collections::{BTreeMap, BTreeSet}};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 mod sys;
 
@@ -54,14 +57,22 @@ mod sys;
 pub enum Error {
     #[display(fmt = "WASM memory begin address is not set")]
     WasmMemAddrIsNotSet,
+    #[display(fmt = "WASM memory size is not set")]
+    WasmMemSizeIsNotSet,
+    #[display(fmt = "WASM memory end addr overflow")]
+    WasmMemEndOverflow,
+    #[display(fmt = "Program pages prefix in storage is not set")]
+    ProgramPrefixIsNotSet,
     #[display(
-        fmt = "Exception is from unknown memory (WASM {:#x} > native page {:x})",
-        wasm_mem_begin,
-        native_page
+        fmt = "Exception is from unknown memory: {:#x} not laies in [{:#x}, {:#x})",
+        native_page_addr,
+        wasm_mem_addr,
+        wasm_mem_end_addr
     )]
     SignalFromUnknownMemory {
-        wasm_mem_begin: usize,
-        native_page: usize,
+        native_page_addr: usize,
+        wasm_mem_addr: usize,
+        wasm_mem_end_addr: usize,
     },
     #[display(
         fmt = "Page data must contain {} bytes, actually has {}",
@@ -89,6 +100,7 @@ pub(crate) struct LazyPagesExecutionContext {
     pub program_storage_prefix: Option<Vec<u8>>,
     /// Page data, which has been in storage before current execution.
     /// For each lazy page, which has been accessed.
+    // TODO: change to set (create _old field for deprecated)
     pub released_lazy_pages: BTreeMap<PageNumber, Option<PageBuf>>,
 
     pub accessed_native_pages: BTreeSet<usize>,
