@@ -852,8 +852,8 @@
         <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">pages_data</span> <span class="op">=</span> <span class="ident">BTreeMap::new</span>();
         <span class="kw">for</span> <span class="ident">page</span> <span class="kw">in</span> (<span class="number">0</span>..<span class="ident">static_pages</span>.<span class="number">0</span>)
             .<span class="ident">map</span>(<span class="ident">WasmPageNumber</span>)
-            .<span class="ident">skip_while</span>(<span class="op">|</span><span class="ident">page</span><span class="op">|</span> <span class="kw-2">*</span><span class="ident">page</span> <span class="op">&lt;</span> <span class="ident">stack_page_count</span>)
             .<span class="ident">chain</span>(<span class="ident">wasm_pages</span>.<span class="ident">iter</span>().<span class="ident">copied</span>())
+            .<span class="ident">skip_while</span>(<span class="op">|</span><span class="ident">page</span><span class="op">|</span> <span class="kw-2">*</span><span class="ident">page</span> <span class="op">&lt;</span> <span class="ident">stack_page_count</span>)
             .<span class="ident">flat_map</span>(<span class="op">|</span><span class="ident">p</span><span class="op">|</span> <span class="ident">p</span>.<span class="ident">to_gear_pages_iter</span>())
         {
             <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">buf</span> <span class="op">=</span> <span class="ident">PageBuf::new_zeroed</span>();
