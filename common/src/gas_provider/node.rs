@@ -17,19 +17,24 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // todo refactoring ideas
-// 1. leave refs as Option in GasNode
-// 2. the idea I wrote in the notebook
-
+// 1. the idea I wrote in the notebook (try with some modification)
 
 use super::*;
 use codec::MaxEncodedLen;
 
 #[derive(Clone, Decode, Debug, Encode, MaxEncodedLen, TypeInfo, PartialEq, Eq)]
-pub enum GasNodeType<ExternalId, Id, Balance> {
-    External { id: ExternalId, value: Balance, refs: ChildrenRefs },
-    ReservedLocal { id: ExternalId, value: Balance },
-    SpecifiedLocal { parent: Id, value: Balance, refs: ChildrenRefs },
-    UnspecifiedLocal { parent: Id },
+pub struct GasNode<ExternalId, Id, Balance> {
+    pub inner: GasNodeType,
+    pub consumed: bool,
+    pub identified_value: GasValueWithOrigin<ExternalId, Id, Balance>,
+}
+
+#[derive(Clone, Decode, Debug, Encode, MaxEncodedLen, TypeInfo, PartialEq, Eq)]
+pub enum GasNodeType {
+    External { refs: ChildrenRefs },
+    ReservedLocal,
+    SpecifiedLocal { refs: ChildrenRefs },
+    UnspecifiedLocal,
 }
 
 #[derive(Clone, Copy, Default, Decode, Debug, Encode, MaxEncodedLen, TypeInfo, PartialEq, Eq)]
@@ -38,7 +43,14 @@ pub struct ChildrenRefs {
     unspec_refs: u32,
 }
 
-impl<ExternalId, Id, Balance> GasNodeType<ExternalId, Id, Balance> {
+#[derive(Clone, Decode, Debug, Encode, MaxEncodedLen, TypeInfo, PartialEq, Eq)]
+pub enum GasValueWithOrigin<ExternalId, Id, Balance> {
+    OwnExternal { id: ExternalId, value: Balance },
+    OwnParental { parent: Id, value: Balance },
+    Parental { parent: Id },
+}
+
+impl GasNodeType {
     pub(crate) fn is_external(&self) -> bool {
         matches!(self, GasNodeType::External { .. })
     }
@@ -56,18 +68,15 @@ impl<ExternalId, Id, Balance> GasNodeType<ExternalId, Id, Balance> {
     }
 }
 
-#[derive(Clone, Decode, Debug, Encode, MaxEncodedLen, TypeInfo, PartialEq, Eq)]
-pub struct GasNode<ExternalId: Clone, Id: Clone, Balance: Zero + Clone> {
-    pub inner: GasNodeType<ExternalId, Id, Balance>,
-    pub consumed: bool,
-}
-
 impl<ExternalId: Clone, Id: Clone + Copy, Balance: Zero + Clone + Copy>
     GasNode<ExternalId, Id, Balance>
 {
     pub fn new(origin: ExternalId, value: Balance) -> Self {
         Self {
-            inner: GasNodeType::External { id: origin, value, refs: Default::default() },
+            inner: GasNodeType::External {
+                refs: Default::default(),
+            },
+            identified_value: GasValueWithOrigin::OwnExternal { id: origin, value },
             consumed: false,
         }
     }
@@ -89,11 +98,10 @@ impl<ExternalId: Clone, Id: Clone + Copy, Balance: Zero + Clone + Copy>
     }
 
     pub fn inner_value_mut(&mut self) -> Option<&mut Balance> {
-        match self.inner {
-            GasNodeType::External { ref mut value, .. } => Some(value),
-            GasNodeType::ReservedLocal { ref mut value, .. } => Some(value),
-            GasNodeType::SpecifiedLocal { ref mut value, .. } => Some(value),
-            GasNodeType::UnspecifiedLocal { .. } => None,
+        match self.identified_value {
+            GasValueWithOrigin::OwnExternal { ref mut value, .. } => Some(value),
+            GasValueWithOrigin::OwnParental { ref mut value, .. } => Some(value),
+            GasValueWithOrigin::Parental { .. } => None,
         }
     }
 
@@ -105,7 +113,7 @@ impl<ExternalId: Clone, Id: Clone + Copy, Balance: Zero + Clone + Copy>
     ///
     /// Patron nodes are those on which other nodes of the tree rely (including the self node).
     pub fn is_patron(&self) -> bool {
-        if let GasNodeType::External { refs, .. } | GasNodeType::SpecifiedLocal { refs, .. } = self.inner {
+        if let GasNodeType::External { refs } | GasNodeType::SpecifiedLocal { refs } = self.inner {
             !self.consumed || refs.unspec_refs != 0
         } else {
             false
@@ -113,45 +121,45 @@ impl<ExternalId: Clone, Id: Clone + Copy, Balance: Zero + Clone + Copy>
     }
 
     pub fn inner_value(&self) -> Option<Balance> {
-        match self.inner {
-            GasNodeType::External { value, .. } => Some(value),
-            GasNodeType::ReservedLocal { value, .. } => Some(value),
-            GasNodeType::SpecifiedLocal { value, .. } => Some(value),
-            GasNodeType::UnspecifiedLocal { .. } => None,
+        match self.identified_value {
+            GasValueWithOrigin::OwnExternal { value, .. } => Some(value),
+            GasValueWithOrigin::OwnParental { value, .. } => Some(value),
+            GasValueWithOrigin::Parental { .. } => None,
         }
     }
 
     pub fn parent(&self) -> Option<Id> {
-        match self.inner {
-            GasNodeType::External { .. } | GasNodeType::ReservedLocal { .. } => None,
-            GasNodeType::SpecifiedLocal { parent, .. }
-            | GasNodeType::UnspecifiedLocal { parent } => Some(parent),
+        match self.identified_value {
+            GasValueWithOrigin::OwnExternal { .. } => None,
+            GasValueWithOrigin::OwnParental { parent, .. } => Some(parent),
+            GasValueWithOrigin::Parental { parent } => Some(parent),
         }
     }
 
-    // todo [sab] None?
     pub fn refs(&self) -> u32 {
         self.spec_refs().saturating_add(self.unspec_refs())
     }
 
     pub fn spec_refs(&self) -> u32 {
         match self.inner {
-            GasNodeType::External { refs, .. } | GasNodeType::SpecifiedLocal { refs, .. } => refs.spec_refs,
-            _ => 0
+            GasNodeType::External { refs } | GasNodeType::SpecifiedLocal { refs } => refs.spec_refs,
+            _ => 0,
         }
     }
 
     pub fn unspec_refs(&self) -> u32 {
         match self.inner {
-            GasNodeType::External { refs, .. } | GasNodeType::SpecifiedLocal { refs, .. } => refs.unspec_refs,
-            _ => 0
+            GasNodeType::External { refs } | GasNodeType::SpecifiedLocal { refs } => {
+                refs.unspec_refs
+            }
+            _ => 0,
         }
     }
 
     fn adjust_refs(&mut self, increase: bool, spec: bool) {
         let refs = match &mut self.inner {
-            GasNodeType::External { refs, .. } | GasNodeType::SpecifiedLocal { refs, .. } => refs,
-            _ => return
+            GasNodeType::External { refs } | GasNodeType::SpecifiedLocal { refs } => refs,
+            _ => return,
         };
 
         match (increase, spec) {

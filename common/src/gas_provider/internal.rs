@@ -88,7 +88,7 @@ where
     ) -> Result<(StorageMap::Value, Option<MapKey>), Error> {
         let mut ret_node = node;
         let mut ret_id = None;
-        if let GasNodeType::UnspecifiedLocal { parent } = ret_node.inner {
+        if let GasValueWithOrigin::Parental { parent } = ret_node.identified_value {
             ret_id = Some(parent);
             ret_node = Self::get_node(parent).ok_or_else(InternalError::parent_is_lost)?;
             if !(ret_node.inner.is_external() || ret_node.inner.is_specified_local()) {
@@ -202,18 +202,18 @@ where
         node: &StorageMap::Value,
     ) -> Result<Option<(StorageMap::Value, MapKey)>, Error> {
         match node.inner {
-            GasNodeType::External { .. } | GasNodeType::ReservedLocal { .. } => Ok(None),
-            GasNodeType::SpecifiedLocal { parent, .. } => {
-                let mut ret_id = parent;
+            GasNodeType::External { .. } | GasNodeType::ReservedLocal => Ok(None),
+            GasNodeType::SpecifiedLocal { .. } => {
+                let mut ret_id = node.parent().ok_or_else(InternalError::parent_is_lost)?;
                 let mut ret_node =
-                    Self::get_node(parent).ok_or_else(InternalError::parent_is_lost)?;
+                    Self::get_node(ret_id).ok_or_else(InternalError::parent_is_lost)?;
                 while !ret_node.is_patron() {
                     match ret_node.inner {
                         GasNodeType::External { .. } => return Ok(None),
-                        GasNodeType::SpecifiedLocal { parent, .. } => {
-                            ret_id = parent;
+                        GasNodeType::SpecifiedLocal { .. } => {
+                            ret_id = ret_node.parent().ok_or_else(InternalError::parent_is_lost)?;
                             ret_node =
-                                Self::get_node(parent).ok_or_else(InternalError::parent_is_lost)?;
+                                Self::get_node(ret_id).ok_or_else(InternalError::parent_is_lost)?;
                         }
                         _ => return Err(InternalError::unexpected_node_type().into()),
                     }
@@ -222,7 +222,7 @@ where
             }
             // Although unspecified local type has a patron parent, it's considered
             // an error to call the method from that type of gas node.
-            GasNodeType::UnspecifiedLocal { .. } => Err(InternalError::forbidden().into()),
+            GasNodeType::UnspecifiedLocal => Err(InternalError::forbidden().into()),
         }
     }
 
@@ -277,9 +277,9 @@ where
                         }
                         return Ok(consume_output);
                     }
-                    GasNodeType::SpecifiedLocal { parent, .. } => {
-                        node_id = parent;
-                        node = Self::get_node(parent).ok_or_else(InternalError::parent_is_lost)?;
+                    GasNodeType::SpecifiedLocal { .. } => {
+                        node_id = node.parent().ok_or_else(InternalError::parent_is_lost)?;
+                        node = Self::get_node(node_id).ok_or_else(InternalError::parent_is_lost)?;
                     }
                     _ => return Err(InternalError::unexpected_node_type().into()),
                 }
@@ -317,17 +317,25 @@ where
         }
 
         // Detect inner from `reserve`.
-        let inner = if reserve {
-            let id = Self::get_external(key)?.expect("existing node always have origin");
-            GasNodeType::ReservedLocal { id, value: amount }
+        let (inner, identified_value) = if reserve {
+            let identified_value = GasValueWithOrigin::OwnExternal {
+                id: Self::get_external(key)?.expect("existing node always have origin"),
+                value: amount,
+            };
+            (GasNodeType::ReservedLocal, identified_value)
         } else {
             node.increase_spec_refs();
-
-            GasNodeType::SpecifiedLocal {
-                value: amount,
+            let identified_value = GasValueWithOrigin::OwnParental {
                 parent: node_id,
-                refs: Default::default(),
-            }
+                value: amount,
+            };
+
+            (
+                GasNodeType::SpecifiedLocal {
+                    refs: Default::default(),
+                },
+                identified_value,
+            )
         };
 
         // A `node` is guaranteed to have inner_value here, because it was get after `Self::node_with_value` call
@@ -342,6 +350,7 @@ where
         let new_node = GasNode {
             inner,
             consumed: false,
+            identified_value,
         };
 
         // Save new node
@@ -406,10 +415,9 @@ where
         Ok(if let Some(node) = Self::get_node(key) {
             // key known, must return the origin, unless corrupted
             let (root, maybe_key) = Self::root(node)?;
-            match root.inner {
-                GasNodeType::External { id, .. } | GasNodeType::ReservedLocal { id, .. } => {
-                    Some((maybe_key.unwrap_or(key), id))
-                }
+            match root.identified_value {
+                GasValueWithOrigin::OwnExternal { id, .. } => Some((maybe_key.unwrap_or(key), id)),
+                // todo [sab] invariant error maybe?
                 _ => unreachable!("Guaranteed by ValueNode::root method"),
             }
         } else {
@@ -466,22 +474,24 @@ where
             StorageMap::remove(key);
 
             match node.inner {
-                GasNodeType::External { .. } | GasNodeType::ReservedLocal { .. } => {
+                GasNodeType::External { .. } | GasNodeType::ReservedLocal => {
                     if !catch_output.is_caught() {
                         return Err(InternalError::value_is_not_caught().into());
                     }
                     catch_output.into_consume_output(origin)
                 }
-                GasNodeType::UnspecifiedLocal { parent } => {
+                GasNodeType::UnspecifiedLocal => {
                     if !catch_output.is_blocked() {
                         return Err(InternalError::value_is_not_blocked().into());
                     }
+                    let parent = node.parent().ok_or_else(InternalError::parent_is_lost)?;
                     Self::try_remove_consumed_ancestors(parent)?
                 }
-                GasNodeType::SpecifiedLocal { parent, .. } => {
+                GasNodeType::SpecifiedLocal { .. } => {
                     if catch_output.is_blocked() {
                         return Err(InternalError::value_is_blocked().into());
                     }
+                    let parent = node.parent().ok_or_else(InternalError::parent_is_lost)?;
                     let consume_output = catch_output.into_consume_output(origin);
                     let consume_ancestors_output = Self::try_remove_consumed_ancestors(parent)?;
                     match (&consume_output, consume_ancestors_output) {
@@ -560,8 +570,9 @@ where
         node.increase_unspec_refs();
 
         let new_node = GasNode {
-            inner: GasNodeType::UnspecifiedLocal { parent: node_id },
+            inner: GasNodeType::UnspecifiedLocal,
             consumed: false,
+            identified_value: GasValueWithOrigin::Parental { parent: node_id },
         };
 
         // Save new node

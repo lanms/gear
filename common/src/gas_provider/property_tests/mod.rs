@@ -246,6 +246,7 @@ fn gas_tree_node_clone() -> BTreeMap<Key, GasNode> {
     })
 }
 
+// todo [sab] check, that if node is external, then its value OwnExternal/if specified local, then OwnParental and so on
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(600))]
     #[test]
@@ -255,9 +256,8 @@ proptest! {
         <GasTreeNodesWrap as storage::MapStorage>::clear();
 
         let origin = H256::random();
-        // `actions` can consist only from tree splits. Then it's length will
-        // represent a potential amount of nodes in the tree.
-        // +1 for the root
+        // `actions` can potentially consist only from tree splits. Then it's length will
+        // represent a potential amount of nodes in the tree +1 for the root
         let mut node_ids = Vec::with_capacity(actions.len() + 1);
         let root_node = H256::random();
         node_ids.push(root_node);
@@ -394,7 +394,8 @@ proptest! {
             }
 
             // Check property: all existing specified and unspecified nodes have a parent in a tree
-            if let GasNodeType::SpecifiedLocal { parent, .. } | GasNodeType::UnspecifiedLocal { parent } = node.inner {
+            if let GasNodeType::SpecifiedLocal { .. } | GasNodeType::UnspecifiedLocal = node.inner {
+                let parent = node.parent().expect("node type with parent");
                 assert!(gas_tree_ids.contains(&parent));
                 // All nodes with parent point to a parent with value
                 let parent_node = GasTreeNodesWrap::get(&parent).expect("checked");
@@ -402,9 +403,9 @@ proptest! {
             }
 
             // Check property: specified local nodes are created only with `split_with_value` call
-            if matches!(node.inner, GasNodeType::SpecifiedLocal { .. }) {
+            if node.inner.is_specified_local() {
                 assert!(spec_ref_nodes.contains(&node_id));
-            } else if matches!(node.inner, GasNodeType::UnspecifiedLocal { .. }) {
+            } else if node.inner.is_unspecified_local() {
                 // Check property: unspecified local nodes are created only with `split` call
                 assert!(unspec_ref_nodes.contains(&node_id));
             }
@@ -421,7 +422,7 @@ proptest! {
                 // That's because anytime node becomes consumed without unspec children, it's no longer a patron.
                 // So `consume` call on non-patron leads a value to be moved upstream or returned to the `origin`.
                 if node.unspec_refs() == 0 {
-                    let value = node.inner_value().expect("node with value, checked");
+                    let value = node.inner_value().expect("node type with value");
                     assert!(value == 0);
                 }
             } else {
@@ -431,7 +432,7 @@ proptest! {
 
             // Check property: if node has non-zero value, it's a patron node (either not consumed or with unspec refs)
             // (Actually, patron can have 0 inner value, when `spend` decreased it's balance to 0, but it's an edge case)
-            // ReservedLocal node can be not consumed with non zero value, but is not a patron
+            // ReservedLocal node can have value and not be consumed, but is not a patron
             if let Some(value) = node.inner_value() {
                 if value != 0 && !node.inner.is_reserved_local() {
                     assert!(node.is_patron());
